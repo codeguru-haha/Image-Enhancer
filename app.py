@@ -1,79 +1,91 @@
-from flask import Flask, render_template, request
+from flask import Flask, render_template, request, send_from_directory, jsonify
 import cv2
 import numpy as np
 from PIL import Image, ImageEnhance
+import os
 
 app = Flask(__name__)
 
-def reduce_red_color(input_image, reduction_factor=0.5):
-    # Split the image into its color channels
-    b, g, r = cv2.split(input_image)
-    
-    # Reduce the red channel intensity
-    r = cv2.multiply(r, reduction_factor)
-    
-    # Merge the modified channels back together
-    modified_image = cv2.merge((b, g, r))
-    
-    return modified_image
+UPLOAD_FOLDER = 'static/upload'
+ENHANCED_FOLDER = 'static/enhancer'
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
 
-def enhance_photo(input_path, output_path, brightness_factor=1.2, contrast_factor=1.2):
-    # Open the input image
-    image = Image.open(input_path)
-    
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['ENHANCED_FOLDER'] = ENHANCED_FOLDER
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def enhance_image(image, brightness_factor=1.2, contrast_factor=1.2, sharpen_factor=1.3):
     # Enhance brightness and contrast
     enhancer = ImageEnhance.Brightness(image)
     enhanced_image = enhancer.enhance(brightness_factor)
-    
 
     enhancer = ImageEnhance.Contrast(enhanced_image)
-    final_image = enhancer.enhance(contrast_factor)
-    
-    # Convert PIL image to OpenCV format
-    cv_image = cv2.cvtColor(np.array(final_image), cv2.COLOR_RGB2BGR)
-    
-    # Apply Gaussian blur for noise reduction
-    denoised_image = cv2.GaussianBlur(cv_image, (5, 5), 0)
-    
-    # Convert OpenCV image back to PIL format
-    denoised_pil_image = Image.fromarray(cv2.cvtColor(denoised_image, cv2.COLOR_BGR2RGB))
+    contrast_enhanced_image = enhancer.enhance(contrast_factor)
 
-    # Convert PIL image to NumPy array
-    denoised_np_image = np.array(denoised_pil_image)
+    # Convert to numpy array
+    cv_image = np.array(contrast_enhanced_image)
 
-    # Reduce red color
-    denoised_reduced_red_image = reduce_red_color(denoised_np_image, reduction_factor=1)
+    # Convert to BGR color space (OpenCV format)
+    cv_image_bgr = cv2.cvtColor(cv_image, cv2.COLOR_RGB2BGR)
 
-    # Convert the modified NumPy array back to PIL format
-    denoised_pil_image_with_reduced_red = Image.fromarray(denoised_reduced_red_image)
+    # Apply non-local means denoising
+    denoised_image_bgr = cv2.fastNlMeansDenoisingColored(cv_image_bgr, None, 10, 10, 7, 21)
 
-    # Save the enhanced and denoised image
-    denoised_pil_image_with_reduced_red.save(output_path)
-    print("Enhanced, denoised, and reduced red image saved as:", output_path)
+    # Apply sharpening
+    kernel = np.array([[-1, -1, -1], [-1, sharpen_factor + 9, -1], [-1, -1, -1]])
+    sharpened_image_bgr = cv2.filter2D(denoised_image_bgr, -1, kernel)
 
-    return image, denoised_pil_image_with_reduced_red  # Return the original and modified images
-    
-    return image, denoised_pil_image  # Return the original and denoised images
+    # Convert back to RGB color space (PIL format)
+    sharpened_image_rgb = cv2.cvtColor(sharpened_image_bgr, cv2.COLOR_BGR2RGB)
+    sharpened_pil_image = Image.fromarray(sharpened_image_rgb)
+
+    return sharpened_pil_image
+
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
     if request.method == 'POST':
-        brightness_factor = float(request.form['brightness'])
-        contrast_factor = float(request.form['contrast'])
+        uploaded_file = request.files['file']
+        if uploaded_file.filename == '':
+            return jsonify({'error': 'No selected file'})
 
-        input_file_path = "static/myphoto.jpg"
-        output_file_path = "static/enhanced_denoised_photo.jpg"
-        
-        original_image, enhanced_image = enhance_photo(input_file_path, output_file_path, brightness_factor, contrast_factor)
-        
-        return render_template('index.html', original_image=input_file_path, enhanced_image=output_file_path)
-    
+        if uploaded_file and allowed_file(uploaded_file.filename):
+            # Save uploaded file
+            filename = os.path.join(app.config['UPLOAD_FOLDER'], uploaded_file.filename)
+            uploaded_file.save(filename)
+
+            # Read the uploaded image
+            image = Image.open(filename)
+
+            # Get user-defined enhancement properties
+            brightness = float(request.form['brightness'])
+            contrast = float(request.form['contrast'])
+            sharpen = float(request.form['sharpen'])
+
+            # Enhance the image
+            enhanced_image = enhance_image(image, brightness, contrast, sharpen)
+
+            # Create a unique filename for the enhanced image
+            enhanced_filename = os.path.join(app.config['ENHANCED_FOLDER'], uploaded_file.filename)
+            
+            # Save enhanced image
+            enhanced_image.save(enhanced_filename)
+
+            # Return the relative URL of the enhanced image
+            enhanced_image_url = '/' + enhanced_filename
+            return jsonify({'enhanced_image': enhanced_image_url})
+
     return render_template('index.html')
+
+@app.route('/uploads/<filename>')
+def uploaded_file(filename):
+    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+
+@app.route('/enhanced/<filename>')
+def enhanced_file(filename):
+    return send_from_directory(app.config['ENHANCED_FOLDER'], filename)
 
 if __name__ == '__main__':
     app.run(debug=False)
-
-
-
-
-
